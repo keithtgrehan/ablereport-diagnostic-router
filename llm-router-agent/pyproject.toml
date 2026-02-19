@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-router-agent"
+version = "0.1.0"
+description = "Reusable LangGraph PM assistant with provider routing and JSON hardening"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "langchain-ollama",
+  "langchain-groq",
+  "langgraph",
+  "pydantic>=2",
+  "python-dotenv",
+  "pytest",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "ruff",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
