@@ -1,0 +1,22 @@
+{
+  "project": {
+    "transport_running": true,
+    "audio_engine_enabled": true
+  },
+  "master_track": {
+    "muted": false,
+    "volume_db": -80.0
+  },
+  "tracks": [
+    {
+      "track_id": "t1",
+      "track_name": "Drums",
+      "muted": false,
+      "solo": false,
+      "volume_db": -6.0,
+      "clips_present": true,
+      "devices_enabled": true,
+      "routing": "master"
+    }
+  ]
+}

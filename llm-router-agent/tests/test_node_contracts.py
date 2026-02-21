@@ -1,57 +1,68 @@
-from llm_router_agent import router
 from llm_router_agent.nodes.allocator import resource_allocation_node
 from llm_router_agent.nodes.auditor import risk_audit_node
-from llm_router_agent.nodes.capacity_audit import capacity_audit_node
 from llm_router_agent.nodes.mapper import dependency_mapping_node
-from llm_router_agent.nodes.optimizer import optimization_insight_node
 from llm_router_agent.nodes.scheduler import smart_scheduler_node
 from llm_router_agent.nodes.scoper import scope_decomposition_node
 from llm_router_agent.schemas import (
+    Dependency,
+    RiskList,
     Schedule,
-    Task,
-    TaskAllocation,
     TaskAllocationList,
-    TaskSchedule,
+    TaskList,
     Team,
     TeamMember,
 )
 
 
-class _FakeResponse:
-    def __init__(self, content: str):
-        self.content = content
+class FakeRouter:
+    def __init__(self, payloads: dict[str, str]) -> None:
+        self.payloads = payloads
+
+    def invoke(self, node_name: str, _prompt: str) -> str:
+        return self.payloads[node_name]
+
+    def invoke_fallback(self, node_name: str, _prompt: str) -> str:
+        return self.payloads[node_name]
+
+    def repair(self, _node_name: str, raw_text: str, _schema_name: str, **_kwargs) -> str:
+        return raw_text
 
 
-class _FakeLLM:
-    def __init__(self, content: str):
-        self._content = content
-
-    def invoke(self, _prompt: str):
-        return _FakeResponse(self._content)
-
-
-def test_node_contracts(monkeypatch):
+def test_node_contracts_with_fake_router():
     payloads = {
         "scoper": (
             "{"
             '"tasks": ['
-            '{"id": "t1", "task_name": "Setup Repo", "task_description": "Init repo", "estimated_day": 1, "required_skill": "Python"},'
-            '{"id": "t2", "task_name": "Build UI", "task_description": "Create dashboard", "estimated_day": 2, "required_skill": "React"}'
+            '{"task_name":"Define API","task_description":"Define endpoints","estimated_day":1,"required_skill":"Python"},'
+            '{"id":"t2","task_name":"Build UI","task_description":"Create frontend","estimated_day":2,"required_skill":"React"}'
             "]}"
         ),
-        "mapper": '{"dependencies": [{"task_id": "t1", "dependent_on": []}, {"task_id": "t2", "dependent_on": ["t1"]}]}',
-        "scheduler": '{"items": [{"task_id": "t1", "start": 0, "end": 1}, {"task_id": "t2", "start": 1, "end": 3}]}',
-        "allocator": '{"allocs": [{"task_id": "t1", "member_name": "Alice"}, {"task_id": "t2", "member_name": "Bob"}]}',
-        "auditor": '{"risks": [{"task_name": "Setup Repo", "score": 3, "reason": "Low complexity"}, {"task_name": "Build UI", "score": 5, "reason": "UI uncertainty"}]}',
-        "optimizer": '{"insight":"Move Build UI review one day earlier and add QA pairing."}',
-        "capacity_audit": "No capacity issues detected",
+        "mapper": (
+            '{"dependencies": ['
+            '{"task_id": "Define API", "dependent_on": []},'
+            '{"task_id": "t2", "dependent_on": ["Define API"]}'
+            "]}"
+        ),
+        "scheduler": (
+            '{"items": ['
+            '{"task_id": "Define API", "start": 0, "end": 1},'
+            '{"task_id": "t2", "start": 1, "end": 3}'
+            "]}"
+        ),
+        "allocator": (
+            '{"allocs": ['
+            '{"task_id": "Define API", "member_name": "Alice"},'
+            '{"task_id": "t2", "member_name": "Bob"}'
+            "]}"
+        ),
+        "auditor": (
+            '{"risks": ['
+            '{"task_name":"Define API","score":3,"reason":"Low complexity"},'
+            '{"task_name":"Build UI","score":6,"reason":"UI uncertainty"}'
+            "]}"
+        ),
     }
-
-    def fake_get_llm(node_name: str, provider=None):
-        _ = provider
-        return _FakeLLM(payloads[node_name])
-
-    monkeypatch.setattr(router, "get_llm", fake_get_llm)
+    router = FakeRouter(payloads)
 
     state = {
         "project_description": "Create a secure dashboard app",
@@ -67,74 +78,33 @@ def test_node_contracts(monkeypatch):
         "project_risk_score_iterations": [],
     }
 
-    updates = scope_decomposition_node(state)
-    assert isinstance(updates, dict)
-    assert "tasks" in updates
-    state.update(updates)
+    scoper_updates = scope_decomposition_node(state, router)
+    assert "tasks" in scoper_updates
+    assert isinstance(scoper_updates["tasks"], TaskList)
+    assert len(scoper_updates["tasks"].task) == 2
+    assert scoper_updates["tasks"].task[0].id is not None
+    assert len(scoper_updates["tasks"].task[0].id) == 4
+    assert scoper_updates["tasks"].task[1].id == "t2"
+    state.update(scoper_updates)
 
-    updates = dependency_mapping_node(state)
-    assert isinstance(updates, dict)
-    assert "dependencies" in updates
-    state.update(updates)
+    mapper_updates = dependency_mapping_node(state, router)
+    assert "dependencies" in mapper_updates
+    assert isinstance(mapper_updates["dependencies"], list)
+    assert all(isinstance(dep, Dependency) for dep in mapper_updates["dependencies"])
+    state.update(mapper_updates)
 
-    updates = smart_scheduler_node(state)
-    assert isinstance(updates, dict)
-    assert "schedule" in updates
-    state.update(updates)
+    scheduler_updates = smart_scheduler_node(state, router)
+    assert "schedule" in scheduler_updates
+    assert isinstance(scheduler_updates["schedule"], Schedule)
+    state.update(scheduler_updates)
 
-    updates = resource_allocation_node(state)
-    assert isinstance(updates, dict)
-    assert "task_allocations" in updates
-    state.update(updates)
+    allocator_updates = resource_allocation_node(state, router)
+    assert "task_allocations" in allocator_updates
+    assert isinstance(allocator_updates["task_allocations"], TaskAllocationList)
+    state.update(allocator_updates)
 
-    updates = capacity_audit_node(state)
-    assert isinstance(updates, dict)
-    assert "insights" in updates
-    state.update(updates)
-
-    updates = risk_audit_node(state)
-    assert isinstance(updates, dict)
-    assert "risks" in updates
-    assert "project_risk_score_iterations" in updates
-    assert "iteration_number" in updates
-    state.update(updates)
-
-    updates = optimization_insight_node(state)
-    assert isinstance(updates, dict)
-    assert "insights" in updates
-
-
-def test_capacity_audit_is_deterministic_without_llm(monkeypatch):
-    def fail_get_llm(*_args, **_kwargs):
-        raise AssertionError("capacity_audit should not call router.get_llm")
-
-    monkeypatch.setattr(router, "get_llm", fail_get_llm)
-
-    member = TeamMember(name="Alice", role="Lead", skills=["Python"], seniority="Senior")
-    task = Task(
-        id="t1",
-        task_name="Setup Repo",
-        task_description="Init repo",
-        estimated_day=1,
-        required_skill="Python",
-    )
-    state = {
-        "insights": [],
-        "schedule": Schedule(
-            schedule=[
-                TaskSchedule(task=task, start_day=0, end_day=2),
-                TaskSchedule(task=task, start_day=1, end_day=3),
-            ]
-        ),
-        "task_allocations": TaskAllocationList(
-            task_allocations=[
-                TaskAllocation(task=task, team_member=member),
-                TaskAllocation(task=task, team_member=member),
-            ]
-        ),
-    }
-
-    updates = capacity_audit_node(state)
-    assert isinstance(updates, dict)
-    assert "insights" in updates
-    assert isinstance(updates["insights"], list)
+    auditor_updates = risk_audit_node(state, router)
+    assert "risks" in auditor_updates
+    assert isinstance(auditor_updates["risks"], RiskList)
+    assert auditor_updates["iteration_number"] == 1
+    assert auditor_updates["project_risk_score_iterations"] == [9]

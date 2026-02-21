@@ -1,0 +1,10 @@
+{
+  "root_cause_category": "muted_master | audio_engine_disabled | transport_stopped | master_level_silenced | no_clips | unknown",
+  "diagnosis": "string",
+  "confidence": "high | medium | low",
+  "evidence": [
+    { "path": "$.path.to.field", "value": "any", "explanation": "string" }
+  ],
+  "checks_run": ["string"],
+  "fix_steps": ["string"]
+}
