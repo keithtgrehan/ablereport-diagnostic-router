@@ -1,4 +1,4 @@
-"""Prompt templates for PM workflow nodes."""
+"""Prompt builders for PM workflow nodes."""
 
 from __future__ import annotations
 
@@ -8,15 +8,14 @@ from typing import Any
 JSON_ONLY_PREFIX = "Return ONLY valid JSON. No markdown. No commentary."
 
 
-def _dump_for_prompt(value: Any) -> str:
+def _dump(value: Any) -> str:
+    """Serialize Pydantic/list/dict payloads for prompt context."""
     if value is None:
         return "null"
     if hasattr(value, "model_dump"):
         payload = value.model_dump()
     elif isinstance(value, list):
-        payload = [
-            item.model_dump() if hasattr(item, "model_dump") else item for item in value
-        ]
+        payload = [item.model_dump() if hasattr(item, "model_dump") else item for item in value]
     elif isinstance(value, dict):
         payload = {
             key: item.model_dump() if hasattr(item, "model_dump") else item
@@ -31,80 +30,79 @@ def _dump_for_prompt(value: Any) -> str:
         return str(payload)
 
 
-def _team_skills(team: Any) -> list[list[str]]:
-    if team is None or not getattr(team, "team_members", None):
+def _normalize_team_skills(team_skills: list[list[str]] | list[str]) -> list[list[str]]:
+    if not team_skills:
         return []
-    return [member.skills for member in team.team_members]
+    first = team_skills[0]
+    if isinstance(first, str):
+        return [list(str(skill) for skill in team_skills)]  # type: ignore[arg-type]
+    return [list(str(skill) for skill in group) for group in team_skills]  # type: ignore[arg-type]
 
 
-def scoper_prompt(project_description: str, team: Any) -> str:
+def scoper_prompt(project_description: str, team_skills: list[list[str]] | list[str]) -> str:
+    """Prompt for task scoping. Expected wrapper: {'tasks': [...]}."""
+    skills = _normalize_team_skills(team_skills)
     return (
         f"{JSON_ONLY_PREFIX}\n"
         f"Project: {project_description}\n"
-        f"Team skills: {_team_skills(team)}\n"
-        "Required fields: task_name, task_description, estimated_day, required_skill.\n"
-        "Rules: 10-15 tasks, each <=3 days, no person names in output.\n"
-        'Example: {"tasks":[{"task_name":"Setup Repo","task_description":"Init repo and CI","estimated_day":1,"required_skill":"DevOps"}]}'
+        f"Team skills: {_dump(skills)}\n"
+        "Required keys per task: task_name, task_description, estimated_day, required_skill.\n"
+        "Rules: 10-15 tasks; each estimated_day <= 3; do not assign people by name.\n"
+        'Output shape: {"tasks":[{"task_name":"Setup Repo","task_description":"Initialize repository and CI","estimated_day":1,"required_skill":"DevOps"}]}'
     )
 
 
-def mapper_prompt(tasks_fmt: str) -> str:
+def mapper_prompt(tasks: Any) -> str:
+    """Prompt for dependency mapping. Expected wrapper: {'dependencies': [...]}."""
     return (
         f"{JSON_ONLY_PREFIX}\n"
-        f"Tasks:\n{tasks_fmt}\n"
-        "Required fields: task_id, dependent_on (array of task IDs).\n"
-        'Example: {"dependencies":[{"task_id":"t1","dependent_on":[]},{"task_id":"t2","dependent_on":["t1"]}]}'
+        f"Tasks: {_dump(tasks)}\n"
+        "Required keys: task_id, dependent_on (array of task_id).\n"
+        'Output shape: {"dependencies":[{"task_id":"t1","dependent_on":[]},{"task_id":"t2","dependent_on":["t1"]}]}'
     )
 
 
-def scheduler_prompt(state: dict[str, Any]) -> str:
+def scheduler_prompt(tasks: Any, dependencies: Any, insights: Any) -> str:
+    """Prompt for scheduling. Preferred output wrapper: {'items': [...]}."""
     return (
         f"{JSON_ONLY_PREFIX}\n"
-        f"Tasks: {_dump_for_prompt(state.get('tasks'))}\n"
-        f"Dependencies: {_dump_for_prompt(state.get('dependencies', []))}\n"
-        f"Insights: {_dump_for_prompt(state.get('insights', []))}\n"
-        "Required fields: task_id, start, end (integers).\n"
-        "Rules: no nulls; if loops exist, break and return best-effort integers.\n"
-        'Example: {"items":[{"task_id":"t1","start":0,"end":2},{"task_id":"t2","start":2,"end":4}]}'
+        f"Tasks: {_dump(tasks)}\n"
+        f"Dependencies: {_dump(dependencies)}\n"
+        f"Insights: {_dump(insights)}\n"
+        "Required keys per item: task_id, start, end (integers).\n"
+        "No nulls; break circular dependencies with best-effort integer schedule.\n"
+        'Output shape: {"items":[{"task_id":"t1","start":0,"end":2},{"task_id":"t2","start":2,"end":4}]}'
     )
 
 
-def allocator_prompt(state: dict[str, Any]) -> str:
+def allocator_prompt(tasks: Any, team: Any) -> str:
+    """Prompt for allocation. Expected wrapper: {'allocs': [...]}."""
     return (
         f"{JSON_ONLY_PREFIX}\n"
-        f"Tasks: {_dump_for_prompt(state.get('tasks'))}\n"
-        f"Team: {_dump_for_prompt(state.get('team'))}\n"
-        "Required fields: task_id, member_name.\n"
-        "Rule: assign every task to one team member.\n"
-        'Example: {"allocs":[{"task_id":"t1","member_name":"Alice"},{"task_id":"t2","member_name":"Bob"}]}'
+        f"Tasks: {_dump(tasks)}\n"
+        f"Team: {_dump(team)}\n"
+        "Required keys: task_id, member_name.\n"
+        "Assign every task to exactly one team member.\n"
+        'Output shape: {"allocs":[{"task_id":"t1","member_name":"Alice"},{"task_id":"t2","member_name":"Bob"}]}'
     )
 
 
-def auditor_prompt(state: dict[str, Any]) -> str:
+def auditor_prompt(schedule: Any, allocations: Any) -> str:
+    """Prompt for risk auditing. Expected wrapper: {'risks': [...]}."""
     return (
         f"{JSON_ONLY_PREFIX}\n"
-        f"Schedule: {_dump_for_prompt(state.get('schedule'))}\n"
-        f"Allocations: {_dump_for_prompt(state.get('task_allocations'))}\n"
-        "Required fields: task_name, score (0-10), reason.\n"
-        'Example: {"risks":[{"task_name":"Auth API","score":8,"reason":"Complex edge cases"}]}'
+        f"Schedule: {_dump(schedule)}\n"
+        f"Allocations: {_dump(allocations)}\n"
+        "Required keys: task_name, score, reason. score must be integer 0..10.\n"
+        'Output shape: {"risks":[{"task_name":"Auth API","score":8,"reason":"Complex edge cases"}]}'
     )
 
 
-def optimizer_prompt(state: dict[str, Any]) -> str:
+def optimizer_prompt(risks: Any) -> str:
+    """Prompt for one optimization insight as structured JSON."""
     return (
         f"{JSON_ONLY_PREFIX}\n"
-        f"Risks: {_dump_for_prompt(state.get('risks'))}\n"
-        f"Insights so far: {_dump_for_prompt(state.get('insights', []))}\n"
-        "Required field: insight.\n"
-        'Example: {"insight":"Move security testing earlier and pair QA on auth tasks."}'
-    )
-
-
-def capacity_audit_exception_prompt(state: dict[str, Any], error: Exception) -> str:
-    return (
-        "Provide one concise fallback insight for capacity audit failure.\n"
-        f"Error: {error}\n"
-        f"Schedule: {_dump_for_prompt(state.get('schedule'))}\n"
-        f"Allocations: {_dump_for_prompt(state.get('task_allocations'))}\n"
-        'Required field: insight. Example: {"insight":"Rebalance Bob tasks on day 3 to Alice."}'
+        f"Risks: {_dump(risks)}\n"
+        "Required key: insight.\n"
+        'Output shape: {"insight":"Move security testing earlier and pair QA on auth tasks."}'
     )

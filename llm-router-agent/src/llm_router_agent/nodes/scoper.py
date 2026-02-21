@@ -1,40 +1,30 @@
-"""Scoper node: project decomposition (Groq-only)."""
+"""Scoper node."""
 
 from __future__ import annotations
 
 import uuid
 
-from .. import router
-from ..json_io import parse_validate_loop
+from ..json_io import invoke_parse_validate
 from ..prompts import scoper_prompt
-from ..schemas import AgentState, TaskList
+from ..router import Router
+from ..schemas import TaskList
 
 
-def _resolve_llms(node_name: str):
-    resolved = router.get_llm(node_name)
-    if isinstance(resolved, tuple):
-        return resolved
-    return resolved, None
+def scope_decomposition_node(state: dict, router: Router) -> dict:
+    """Decompose project description into tasks."""
+    team = state.get("team")
+    team_skills: list[list[str]] = []
+    if team is not None and getattr(team, "team_members", None):
+        team_skills = [member.skills for member in team.team_members]
 
-
-def node(state: AgentState) -> dict:
-    primary_llm, _ = _resolve_llms("scoper")
-    tasks: TaskList = parse_validate_loop(
-        llm=primary_llm,
-        prompt=scoper_prompt(
-            project_description=state.get("project_description", ""),
-            team=state.get("team"),
-        ),
-        model_cls=TaskList,
-        max_retries=1,
+    prompt = scoper_prompt(
+        project_description=state.get("project_description", ""),
+        team_skills=team_skills,
     )
+    tasks: TaskList = invoke_parse_validate(router, "scoper", prompt, TaskList)
 
     for task in tasks.task:
         if not task.id:
             task.id = str(uuid.uuid4())[:4]
 
     return {"tasks": tasks}
-
-
-# Backward-compatible export name.
-scope_decomposition_node = node

@@ -1,8 +1,9 @@
-"""JSON extraction and validation utilities with retry/repair support."""
+"""JSON extraction, repair, and parse/validate utilities."""
 
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any, TypeVar
 
@@ -12,92 +13,65 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 def _content(response: Any) -> str:
-    """Normalize LangChain-like responses to plain text."""
+    """Normalize model/router responses to plain text."""
     if hasattr(response, "content"):
         return str(response.content)
     return str(response)
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+        return max(1, value)
+    except ValueError:
+        return default
+
+
 def strip_fences(text: str) -> str:
-    """Remove markdown code fences from model output."""
+    """Remove markdown code fences from text."""
     stripped = (text or "").strip()
-    stripped = stripped.replace("```json", "").replace("```JSON", "").replace("```", "").strip()
-    stripped = re.sub(r"^`{3,}\s*json\s*", "", stripped, flags=re.IGNORECASE).strip()
-    stripped = re.sub(r"`{3,}\s*$", "", stripped).strip()
-    return stripped
+    stripped = stripped.replace("```json", "").replace("```JSON", "").replace("```", "")
+    return stripped.strip()
 
 
-def _extract_balanced_fragment(text: str, start_index: int) -> str | None:
-    """Extract the first balanced JSON fragment starting at start_index."""
-    open_char = text[start_index]
-    close_char = "}" if open_char == "{" else "]"
-
-    depth = 0
-    in_string = False
-    escaped = False
-
-    for idx in range(start_index, len(text)):
-        ch = text[idx]
-
-        if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-            continue
-
-        if ch == '"':
-            in_string = True
-            continue
-
-        if ch == open_char:
-            depth += 1
-        elif ch == close_char:
-            depth -= 1
-            if depth == 0:
-                return text[start_index : idx + 1]
-
-    return None
-
-
-def extract_json_str(text: str) -> str | None:
+def extract_json_text(text: str) -> str | None:
     """
-    Extract the first valid JSON object/array string from mixed model output.
+    Extract first JSON object/array from mixed text.
 
-    Returns None when no valid JSON block can be found.
+    Rules:
+    - remove fences
+    - if text starts with '{' or '[' return trimmed text
+    - else find first '{...}' via regex DOTALL; if none, first '[...]'
     """
     candidate = strip_fences(text)
     if not candidate:
         return None
 
-    # Fast path: full output is already valid JSON.
-    try:
-        json.loads(candidate)
-        return candidate
-    except Exception:
-        pass
+    trimmed = candidate.strip()
+    if trimmed.startswith("{") or trimmed.startswith("["):
+        return trimmed
 
-    # Mixed text path: find first balanced object/array that parses.
-    for idx, ch in enumerate(candidate):
-        if ch not in ("{", "["):
-            continue
-        fragment = _extract_balanced_fragment(candidate, idx)
-        if not fragment:
-            continue
-        try:
-            json.loads(fragment)
-            return fragment
-        except Exception:
-            continue
+    obj_match = re.search(r"\{.*?\}", trimmed, flags=re.DOTALL)
+    arr_match = re.search(r"\[.*?\]", trimmed, flags=re.DOTALL)
+
+    if obj_match and arr_match:
+        if arr_match.start() < obj_match.start():
+            return arr_match.group(0).strip()
+        return obj_match.group(0).strip()
+    if obj_match:
+        return obj_match.group(0).strip()
+    if arr_match:
+        return arr_match.group(0).strip()
 
     return None
 
 
 def extract_json(text: str) -> dict | list | None:
-    """Extract and parse first valid JSON object/array from text."""
-    extracted = extract_json_str(text)
+    """Compatibility helper: parse extracted JSON text into dict/list."""
+    extracted = extract_json_text(text)
     if extracted is None:
         return None
     try:
@@ -109,13 +83,243 @@ def extract_json(text: str) -> dict | list | None:
     return None
 
 
-def repair_json(llm: Any, raw_text: str) -> str:
-    """Ask the model to repair broken output into strict JSON-only text."""
-    prompt = (
-        "Return ONLY valid JSON.\n"
-        "Fix the content below into valid JSON. No markdown. No commentary.\n\n"
-        f"RAW_OUTPUT:\n{raw_text}\n"
+def parse_validate(json_text: str, model_cls: type[ModelT]) -> ModelT:
+    """Parse JSON string and validate against a Pydantic model."""
+    parsed = json.loads(json_text)
+    return model_cls.model_validate(parsed)
+
+
+def make_repair_prompt(raw: str, model_name: str) -> str:
+    """Build strict repair prompt for malformed/mixed model output."""
+    return (
+        "Return ONLY valid JSON. No markdown. No commentary.\n"
+        f"Fix the output so it matches schema: {model_name}.\n\n"
+        "BROKEN_OR_MIXED_OUTPUT:\n"
+        f"{raw}\n"
     )
+
+
+def _router_allows_fallback(router: Any, node_name: str) -> bool:
+    """Best-effort check for fallback availability on injected router."""
+    if hasattr(router, "invoke_fallback"):
+        return True
+
+    if hasattr(router, "route"):
+        try:
+            resolved = router.route(node_name)
+            return getattr(resolved, "fallback", None) is not None
+        except Exception:
+            pass
+
+    if hasattr(router, "get_llm"):
+        try:
+            models = router.get_llm(node_name)
+            if isinstance(models, tuple):
+                return models[1] is not None
+        except Exception:
+            pass
+
+    return False
+
+
+def _router_invoke(router: Any, node_name: str, prompt: str, *, use_fallback: bool) -> str:
+    """Invoke router primary/fallback path and normalize result to text."""
+    if use_fallback and hasattr(router, "invoke_fallback"):
+        return _content(router.invoke_fallback(node_name, prompt))
+
+    if not use_fallback and hasattr(router, "invoke"):
+        return _content(router.invoke(node_name, prompt))
+
+    if hasattr(router, "get_llm"):
+        models = router.get_llm(node_name)
+        if isinstance(models, tuple):
+            primary_llm, fallback_llm = models
+        else:
+            primary_llm, fallback_llm = models, None
+
+        llm = fallback_llm if use_fallback else primary_llm
+        if llm is None:
+            raise RuntimeError(f"{node_name}: fallback model is not configured")
+        return _content(llm.invoke(prompt))
+
+    raise RuntimeError("Router must expose invoke/get_llm (and optionally invoke_fallback)")
+
+
+def _router_repair(
+    router: Any,
+    node_name: str,
+    raw: str,
+    model_name: str,
+    *,
+    use_fallback: bool,
+) -> str:
+    """
+    Repair via router call site.
+
+    Priority:
+    1) router.repair(...)
+    2) router invoke with generated repair prompt
+    """
+    if hasattr(router, "repair"):
+        repair_fn = router.repair
+        try:
+            return _content(
+                repair_fn(
+                    node_name,
+                    raw,
+                    model_name,
+                    use_fallback=use_fallback,
+                )
+            )
+        except TypeError:
+            try:
+                return _content(repair_fn(node_name, raw, model_name))
+            except TypeError:
+                pass
+
+    prompt = make_repair_prompt(raw, model_name)
+    return _router_invoke(router, node_name, prompt, use_fallback=use_fallback)
+
+
+def _extract_parse_validate(raw: str, model_cls: type[ModelT]) -> ModelT:
+    json_text = extract_json_text(raw)
+    if json_text is None:
+        raise RuntimeError("No JSON object/array found in model output.")
+    return parse_validate(json_text, model_cls)
+
+
+def invoke_parse_validate(
+    router: Any,
+    node_name: str,
+    prompt: str,
+    model_cls: type[ModelT],
+    max_retries: int | None = None,
+    repair_tries: int | None = None,
+) -> ModelT:
+    """
+    Invoke router, parse and validate JSON, repair on failure, and use fallback if available.
+
+    Defaults:
+    - max_retries from JSON_MAX_RETRIES (default 4)
+    - repair_tries from JSON_REPAIR_TRIES (default 1)
+    """
+    retries = max_retries if max_retries is not None else _env_int("JSON_MAX_RETRIES", 4)
+    repairs = repair_tries if repair_tries is not None else _env_int("JSON_REPAIR_TRIES", 1)
+    retries = max(1, int(retries))
+    repairs = max(1, int(repairs))
+
+    last_error: Exception | None = None
+    last_raw = ""
+    has_fallback = _router_allows_fallback(router, node_name)
+
+    for _ in range(retries):
+        for use_fallback in (False, True):
+            if use_fallback and not has_fallback:
+                continue
+
+            raw = ""
+            try:
+                raw = _router_invoke(router, node_name, prompt, use_fallback=use_fallback)
+            except Exception as exc:
+                last_error = exc
+                continue
+
+            last_raw = raw or last_raw
+
+            try:
+                return _extract_parse_validate(raw, model_cls)
+            except Exception as exc:
+                last_error = exc
+
+            repair_input = raw
+            for _ in range(repairs):
+                repaired_raw = ""
+                try:
+                    repaired_raw = _router_repair(
+                        router,
+                        node_name,
+                        repair_input,
+                        model_cls.__name__,
+                        use_fallback=use_fallback,
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    continue
+
+                last_raw = repaired_raw or last_raw
+                try:
+                    return _extract_parse_validate(repaired_raw, model_cls)
+                except Exception as exc:
+                    last_error = exc
+                    repair_input = repaired_raw
+
+    snippet = (last_raw or "").strip().replace("\n", " ")[:1200]
+    raise RuntimeError(
+        f"{node_name}: JSON parse/validate failed for {model_cls.__name__}. "
+        f"Last error: {last_error}. Last raw output snippet: {snippet}"
+    )
+
+
+class _SingleLLMRouter:
+    """Adapter for compatibility calls that pass a direct LLM object."""
+
+    def __init__(self, llm: Any) -> None:
+        self.llm = llm
+
+    def invoke(self, _node_name: str, prompt: str) -> str:
+        return _content(self.llm.invoke(prompt))
+
+    def repair(self, _node_name: str, raw: str, model_name: str, **_kwargs: Any) -> str:
+        prompt = make_repair_prompt(raw, model_name)
+        return _content(self.llm.invoke(prompt))
+
+
+class _PairLLMRouter:
+    """Adapter for compatibility helpers using explicit primary/fallback LLMs."""
+
+    def __init__(self, primary_llm: Any, fallback_llm: Any | None) -> None:
+        self.primary_llm = primary_llm
+        self.fallback_llm = fallback_llm
+
+    def invoke(self, _node_name: str, prompt: str) -> str:
+        return _content(self.primary_llm.invoke(prompt))
+
+    def invoke_fallback(self, _node_name: str, prompt: str) -> str:
+        if self.fallback_llm is None:
+            raise RuntimeError("Fallback model is not configured")
+        return _content(self.fallback_llm.invoke(prompt))
+
+    def repair(
+        self,
+        _node_name: str,
+        raw: str,
+        model_name: str,
+        *,
+        use_fallback: bool = False,
+    ) -> str:
+        llm = self.fallback_llm if use_fallback and self.fallback_llm is not None else self.primary_llm
+        prompt = make_repair_prompt(raw, model_name)
+        return _content(llm.invoke(prompt))
+
+
+# Backward-compatible names used by current code/tests.
+def strip_code_fences(text: str) -> str:
+    return strip_fences(text)
+
+
+def extract_json_str(text: str) -> str | None:
+    return extract_json_text(text)
+
+
+def parse_and_validate_json(raw_text: str, model_cls: type[ModelT]) -> ModelT:
+    extracted = extract_json_text(raw_text)
+    if extracted is None:
+        raise RuntimeError("No JSON object/array found in model output.")
+    return parse_validate(extracted, model_cls)
+
+
+def repair_json(llm: Any, raw_text: str) -> str:
+    prompt = make_repair_prompt(raw_text, "UnknownSchema")
     return _content(llm.invoke(prompt))
 
 
@@ -123,80 +327,18 @@ def parse_validate_loop(
     llm: Any,
     prompt: str,
     model_cls: type[ModelT],
-    max_retries: int = 1,
+    max_retries: int | None = None,
+    repair_tries: int | None = None,
 ) -> ModelT:
-    """
-    Invoke model, parse/extract JSON, validate with Pydantic, and retry with repair.
-
-    One repair attempt is performed on each retry cycle.
-    """
-    retries = max(1, int(max_retries))
-    last_error: Exception | None = None
-    last_raw = ""
-
-    for _ in range(retries):
-        raw = ""
-        try:
-            raw = _content(llm.invoke(prompt))
-        except Exception as exc:
-            last_error = exc
-
-        last_raw = raw or last_raw
-        parsed = extract_json(raw) if raw and raw.strip() else None
-
-        if parsed is not None:
-            try:
-                return model_cls.model_validate(parsed)
-            except Exception as exc:
-                last_error = exc
-        else:
-            if not raw or not raw.strip():
-                last_error = RuntimeError("Empty response from model.")
-            else:
-                last_error = RuntimeError("No JSON object/array found in model output.")
-
-        repaired_raw = ""
-        try:
-            repaired_raw = repair_json(llm, raw)
-        except Exception as exc:
-            last_error = exc
-            continue
-
-        last_raw = repaired_raw or last_raw
-        repaired_parsed = (
-            extract_json(repaired_raw) if repaired_raw and repaired_raw.strip() else None
-        )
-
-        if repaired_parsed is not None:
-            try:
-                return model_cls.model_validate(repaired_parsed)
-            except Exception as exc:
-                last_error = exc
-        else:
-            if not repaired_raw or not repaired_raw.strip():
-                last_error = RuntimeError("Empty repair response from model.")
-            else:
-                last_error = RuntimeError("Repair output did not contain valid JSON.")
-
-    snippet = (last_raw or "").strip().replace("\n", " ")[:1200]
-    raise RuntimeError(
-        f"JSON parse/validate failed for {model_cls.__name__}. "
-        f"Last error: {last_error}. Last raw output snippet: {snippet}"
+    adapter = _SingleLLMRouter(llm)
+    return invoke_parse_validate(
+        adapter,
+        node_name="direct",
+        prompt=prompt,
+        model_cls=model_cls,
+        max_retries=max_retries,
+        repair_tries=repair_tries,
     )
-
-
-# Backward-compatible helpers used by existing nodes/tests.
-def strip_code_fences(text: str) -> str:
-    """Compatibility alias for strip_fences."""
-    return strip_fences(text)
-
-
-def parse_and_validate_json(raw_text: str, model_cls: type[ModelT]) -> ModelT:
-    """Compatibility helper: parse already-generated raw model output once."""
-    parsed = extract_json(raw_text)
-    if parsed is None:
-        raise RuntimeError("No JSON object/array found in model output.")
-    return model_cls.model_validate(parsed)
 
 
 def invoke_json_with_fallback(
@@ -208,16 +350,12 @@ def invoke_json_with_fallback(
     node_name: str,
     repair_attempts: int = 1,
 ) -> ModelT:
-    """Compatibility helper for node routing with primary/fallback providers."""
-    last_error: Exception | None = None
-    max_retries = max(1, int(repair_attempts) + 1)
-
-    for llm in (primary_llm, fallback_llm):
-        if llm is None:
-            continue
-        try:
-            return parse_validate_loop(llm, prompt, model_cls, max_retries=max_retries)
-        except Exception as exc:
-            last_error = exc
-
-    raise RuntimeError(f"{node_name}: provider chain failed") from last_error
+    adapter = _PairLLMRouter(primary_llm=primary_llm, fallback_llm=fallback_llm)
+    return invoke_parse_validate(
+        adapter,
+        node_name=node_name,
+        prompt=prompt,
+        model_cls=model_cls,
+        max_retries=1,
+        repair_tries=max(1, int(repair_attempts)),
+    )

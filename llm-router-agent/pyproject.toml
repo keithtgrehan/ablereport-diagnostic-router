@@ -9,22 +9,27 @@ description = "Reusable LangGraph PM assistant with provider routing and JSON ha
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "langchain-ollama",
-  "langchain-groq",
   "langgraph",
   "pydantic>=2",
   "python-dotenv",
-  "pytest",
+  "langchain-ollama",
+  "langchain-groq",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest",
   "ruff",
+  "mypy",
+]
+viz = [
+  "pandas",
+  "plotly",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["llm_router_agent*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

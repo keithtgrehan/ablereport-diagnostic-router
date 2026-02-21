@@ -1,73 +1,90 @@
 # llm-router-agent
 
-Reusable PM planning agent package for AbleReport.
+Reusable LLM Router Agent library for AbleReport project planning workflows.
 
-Distribution name: `llm-router-agent`  
-Python import: `llm_router_agent`
+- Distribution: `llm-router-agent`
+- Import: `llm_router_agent`
+- Routing policy: Groq for `scoper`, Ollama-first for the rest, with explicit mapper fallback to Groq
 
 ## Quickstart
 
-### 1) Install
+1. Create and activate a virtual environment:
 
 ```bash
 cd llm-router-agent
+python -m venv .venv
+source .venv/bin/activate
+```
+
+2. Install in editable mode:
+
+```bash
 pip install -e .
 ```
 
-### 2) Set environment variables
+3. Set required env vars:
 
 ```bash
-export OLLAMA_MODEL=llama3.1:8b
-export OLLAMA_BASE_URL=http://localhost:11434
-
 export GROQ_API_KEY=your_groq_api_key
+export LLM_PROVIDER=ollama
+export OLLAMA_MODEL=llama3.1
 export GROQ_MODEL=llama-3.3-70b-versatile
 ```
 
-Optional default:
+Optional:
 
 ```bash
-export LLM_PROVIDER=ollama
+export OLLAMA_BASE_URL=http://localhost:11434
 ```
 
-### 3) Run demo
+4. Run the graph:
 
-```bash
-jupyter notebook examples/pm_assistant_demo.ipynb
+```python
+from llm_router_agent import Team, TeamMember, build_graph
+
+team = Team(
+    team_members=[
+        TeamMember(name="Alice", role="Lead", skills=["Python", "Planning"], seniority="Senior"),
+        TeamMember(name="Bob", role="Frontend", skills=["React"], seniority="Mid"),
+    ]
+)
+
+state = {
+    "project_description": "Build a customer analytics dashboard",
+    "team": team,
+    "iteration_number": 0,
+    "max_iteration": 2,
+    "insights": [],
+    "project_risk_score_iterations": [],
+}
+
+graph = build_graph()
+result = graph.invoke(state)
+print(result.keys())
 ```
 
-### 4) Run tests (CI-friendly)
+Run tests:
 
 ```bash
 pytest -q
 ```
 
-## Router Policy
-
-- `scoper` -> ALWAYS Groq
-- `mapper` -> Ollama then Groq fallback
-- others -> Ollama-first
-
-## JSON Hardening
-
-All JSON-producing nodes use a hardened parse flow:
-
-- strip markdown code fences
-- extract first valid JSON object/array from mixed output
-- `json.loads` + Pydantic validation
-- one repair loop with strict JSON-only instruction
-- fallback model/provider if still invalid or node fails
-
 ## Architecture
 
 ```mermaid
 flowchart LR
-    A["scoper (Groq)"] --> B["mapper (Ollama -> Groq fallback)"]
-    B --> C["scheduler (Ollama-first)"]
-    C --> D["allocator (Ollama-first)"]
-    D --> E["capacity_audit (Ollama-first)"]
-    E --> F["auditor (Ollama-first)"]
-    F -->|high risk| G["optimizer (Ollama-first)"]
-    G --> C
-    F -->|low risk or max iterations| H["END"]
+    A["Router Policy"] --> B["scoper (Groq)"]
+    A --> C["mapper (Ollama -> Groq fallback)"]
+    A --> D["scheduler/allocator/capacity_audit/auditor/optimizer (Ollama-first)"]
+    B --> E["LangGraph State Machine"]
+    C --> E
+    D --> E
+    E --> F["State Updates via Typed Schemas"]
+    F --> E
 ```
+
+## How This Helps AbleReport
+
+- Deterministic JSON IO: strips fences, extracts JSON from mixed text, validates with Pydantic, and repairs malformed payloads.
+- Per-node routing: provider selection is explicit and centralized, so scoping, mapping, and execution behavior are predictable.
+- Reusable node contracts: each node is a pure state-update function with stable input/output schema boundaries.

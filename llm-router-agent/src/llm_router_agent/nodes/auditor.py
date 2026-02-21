@@ -1,22 +1,22 @@
-"""Auditor node: risk scoring with JSON hardening and fallback."""
+"""Auditor node."""
 
 from __future__ import annotations
 
-from typing import Any, List
+from typing import Any
 
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 
-from .. import router
-from ..json_io import parse_validate_loop
+from ..json_io import invoke_parse_validate
 from ..prompts import auditor_prompt
-from ..schemas import AgentState, Risk, RiskList, SafeInt
+from ..router import Router
+from ..schemas import Risk, RiskList, SafeInt
 
 
-def _standardize_to_list(data: Any, key_alias: str = "id") -> List[dict]:
+def _standardize_to_list(data: Any, key_alias: str = "id") -> list[dict]:
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        converted = []
+        converted: list[dict] = []
         for key, value in data.items():
             if isinstance(value, dict):
                 item = {key_alias: key}
@@ -26,25 +26,28 @@ def _standardize_to_list(data: Any, key_alias: str = "id") -> List[dict]:
     return []
 
 
-def _repair_risk_item(item: Any) -> Any:
-    if isinstance(item, dict):
-        if "task_name" not in item:
-            if "id" in item:
-                item["task_name"] = str(item["id"])
-            elif "risk_id" in item:
-                item["task_name"] = str(item["risk_id"])
-            elif "task_id" in item:
-                item["task_name"] = str(item["task_id"])
+def repair_risk_item(item: Any) -> Any:
+    """Patch common missing fields from weak risk outputs."""
+    if not isinstance(item, dict):
+        return item
 
-        if "score" not in item and "impact" in item:
-            impact_map = {"high": 8, "medium": 5, "low": 2}
-            item["score"] = impact_map.get(str(item["impact"]).lower(), 5)
+    if "task_name" not in item:
+        if "id" in item:
+            item["task_name"] = str(item["id"])
+        elif "risk_id" in item:
+            item["task_name"] = str(item["risk_id"])
+        elif "task_id" in item:
+            item["task_name"] = str(item["task_id"])
 
-        if "score" not in item:
-            item["score"] = 5
+    if "score" not in item and "impact" in item:
+        impact_map = {"high": 8, "medium": 5, "low": 2}
+        item["score"] = impact_map.get(str(item["impact"]).lower(), 5)
 
-        if "reason" not in item:
-            item["reason"] = item.get("description") or item.get("justification") or "No reason"
+    if "score" not in item:
+        item["score"] = 5
+
+    if "reason" not in item:
+        item["reason"] = item.get("description") or item.get("justification") or "No reason"
 
     return item
 
@@ -63,7 +66,10 @@ class SimpleRisk(BaseModel):
             "ID",
         ),
     )
-    score: SafeInt = Field(..., validation_alias=AliasChoices("score", "risk_score", "Risk Score"))
+    score: SafeInt = Field(
+        ...,
+        validation_alias=AliasChoices("score", "risk_score", "Risk Score"),
+    )
     reason: str = Field(
         ...,
         validation_alias=AliasChoices(
@@ -78,12 +84,12 @@ class SimpleRisk(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def repair(cls, data: Any) -> Any:
-        return _repair_risk_item(data)
+    def patch(cls, data: Any) -> Any:
+        return repair_risk_item(data)
 
 
 class SimpleRiskList(BaseModel):
-    risks: List[SimpleRisk]
+    risks: list[SimpleRisk]
 
     @model_validator(mode="before")
     @classmethod
@@ -106,57 +112,25 @@ class SimpleRiskList(BaseModel):
 
         if isinstance(target, dict):
             return {"risks": _standardize_to_list(target, key_alias="task_name")}
-
         if isinstance(target, list):
             return {"risks": target}
-
         return data
 
 
-def _resolve_llms(node_name: str):
-    resolved = router.get_llm(node_name)
-    if isinstance(resolved, tuple):
-        return resolved
-    return resolved, None
+def risk_audit_node(state: dict, router: Router) -> dict:
+    """Audit plan risk and update risk history + iteration count."""
+    prompt = auditor_prompt(state.get("schedule"), state.get("task_allocations"))
+    response: SimpleRiskList = invoke_parse_validate(router, "auditor", prompt, SimpleRiskList)
 
-
-def _to_update(state: AgentState, response: SimpleRiskList) -> dict:
     final_risks = [
-        Risk(task_name=risk.task_name, score=risk.score, reason=risk.reason)
-        for risk in response.risks
+        Risk(task_name=r.task_name, score=r.score, reason=r.reason) for r in response.risks
     ]
-    project_score = sum(risk.score for risk in final_risks)
+    risk_list = RiskList(risks=final_risks)
+    project_score = sum(r.score for r in final_risks)
+
     return {
-        "risks": RiskList(risks=final_risks),
+        "risks": risk_list,
         "project_risk_score_iterations": state.get("project_risk_score_iterations", [])
         + [project_score],
         "iteration_number": state.get("iteration_number", 0) + 1,
     }
-
-
-def node(state: AgentState) -> dict:
-    primary_llm, fallback_llm = _resolve_llms("auditor")
-    prompt = auditor_prompt(state)
-
-    try:
-        response: SimpleRiskList = parse_validate_loop(
-            llm=primary_llm,
-            prompt=prompt,
-            model_cls=SimpleRiskList,
-            max_retries=1,
-        )
-        return _to_update(state, response)
-    except RuntimeError:
-        if fallback_llm is None:
-            raise
-        response = parse_validate_loop(
-            llm=fallback_llm,
-            prompt=prompt,
-            model_cls=SimpleRiskList,
-            max_retries=1,
-        )
-        return _to_update(state, response)
-
-
-# Backward-compatible export name.
-risk_audit_node = node
