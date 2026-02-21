@@ -31,6 +31,17 @@ def build_graph(router: Router | None = None):
 
     active_router = router if router is not None else _default_router()
 
+    def _merge(node_fn):
+        def _wrapped(state: dict[str, Any]) -> dict[str, Any]:
+            out = node_fn(state, active_router)
+            if not isinstance(out, dict):
+                raise TypeError(
+                    f"Node {node_fn.__name__} must return dict, got {type(out).__name__}"
+                )
+            return {**state, **out}
+
+        return _wrapped
+
     def routing_logic(state: dict[str, Any]):
         scores = state.get("project_risk_score_iterations", [])
         last_score = scores[-1] if scores else 999
@@ -40,13 +51,13 @@ def build_graph(router: Router | None = None):
 
     workflow = StateGraph(dict)
 
-    workflow.add_node("scoper", lambda state: scope_decomposition_node(state, active_router))
-    workflow.add_node("mapper", lambda state: dependency_mapping_node(state, active_router))
-    workflow.add_node("scheduler", lambda state: smart_scheduler_node(state, active_router))
-    workflow.add_node("allocator", lambda state: resource_allocation_node(state, active_router))
-    workflow.add_node("capacity_audit", lambda state: capacity_audit_node(state, active_router))
-    workflow.add_node("auditor", lambda state: risk_audit_node(state, active_router))
-    workflow.add_node("optimizer", lambda state: optimization_insight_node(state, active_router))
+    workflow.add_node("scoper", _merge(scope_decomposition_node))
+    workflow.add_node("mapper", _merge(dependency_mapping_node))
+    workflow.add_node("scheduler", _merge(smart_scheduler_node))
+    workflow.add_node("allocator", _merge(resource_allocation_node))
+    workflow.add_node("capacity_audit", _merge(capacity_audit_node))
+    workflow.add_node("auditor", _merge(risk_audit_node))
+    workflow.add_node("optimizer", _merge(optimization_insight_node))
 
     workflow.set_entry_point("scoper")
     workflow.add_edge("scoper", "mapper")

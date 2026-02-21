@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import json
 from typing import List
+from typing import Any
+
+from ..json_io import extract_json_text
+from ..router import ModelRegistry, Router, RouterPolicy
+from ..validation import validate_report
 
 
 CHECK_IDS_ORDER = [
@@ -31,6 +37,119 @@ def _unknown(reason: str) -> dict:
             "Confirm at least one track has an audible clip playing and is routed to the Master.",
         ],
     }
+
+
+def _parse_ai_key_input(ai_key_json: str | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(ai_key_json, dict):
+        return ai_key_json
+    if isinstance(ai_key_json, str):
+        parsed = json.loads(ai_key_json)
+        if not isinstance(parsed, dict):
+            raise TypeError("ai_key_json must decode to a JSON object.")
+        return parsed
+    raise TypeError("ai_key_json must be a dict or JSON string.")
+
+
+def _build_router(router: Router | None) -> Router:
+    if router is not None:
+        return router
+    registry = ModelRegistry()
+    policy = RouterPolicy(default_provider=registry.llm_provider)
+    return Router(registry=registry, policy=policy)
+
+
+def _llm_prompt(ai_key: dict[str, Any], strict: bool, prior_errors: list[str] | None = None) -> str:
+    retry_note = "STRICT VALIDATION RETRY." if strict else "FIRST ATTEMPT."
+    errors_text = ""
+    if prior_errors:
+        joined = "; ".join(prior_errors[:8])
+        errors_text = f"\nPrior validation errors: {joined}"
+
+    return (
+        "Return ONLY valid JSON. No markdown. No commentary.\n"
+        f"{retry_note}\n"
+        "Task: diagnose the no-sound issue from AI Key.\n"
+        "Required schema keys: intent, diagnosis, root_cause_category, confidence, "
+        "evidence, checks_run, fix_steps.\n"
+        "Rules:\n"
+        "- intent must be 'no_sound'\n"
+        "- every evidence item must include path, value, explanation\n"
+        "- each evidence.path must exist in AI Key\n"
+        "- each evidence.value must exactly match AI Key value at that path\n"
+        "- checks_run and fix_steps must be arrays of strings\n"
+        f"{errors_text}\n\n"
+        "AI_KEY_JSON:\n"
+        f"{json.dumps(ai_key, ensure_ascii=False)}\n"
+    )
+
+
+def _parse_llm_report(raw_text: str) -> dict[str, Any]:
+    extracted = extract_json_text(raw_text)
+    if extracted is None:
+        raise ValueError("LLM output did not contain JSON.")
+    parsed = json.loads(extracted)
+    if not isinstance(parsed, dict):
+        raise ValueError("LLM output JSON must be an object.")
+    return parsed
+
+
+def _deterministic_with_intent(ai_key: dict[str, Any]) -> dict[str, Any]:
+    base = diagnose_no_sound(ai_key)
+    return {"intent": "no_sound", **base}
+
+
+def _fallback_with_note(ai_key: dict[str, Any], errors: list[str]) -> dict[str, Any]:
+    report = _deterministic_with_intent(ai_key)
+    note = "LLM failed validation; using deterministic fallback."
+    if errors:
+        note = f"{note} Errors: {'; '.join(errors[:4])}"
+    report["notes"] = note
+    return report
+
+
+def diagnose_no_sound_validated(
+    ai_key_json: str | dict[str, Any],
+    *,
+    no_llm: bool = False,
+    require_llm: bool = False,
+    router: Router | None = None,
+) -> dict[str, Any]:
+    """
+    Run no-sound diagnosis with optional validated LLM path.
+
+    Behavior:
+    - if no_llm=True: deterministic report
+    - if require_llm=True: try LLM -> validate -> strict retry once on failure
+      -> deterministic fallback with "LLM failed validation" note
+    - default: deterministic report
+    """
+    if no_llm and require_llm:
+        raise ValueError("no_llm and require_llm cannot both be True.")
+
+    ai_key = _parse_ai_key_input(ai_key_json)
+
+    if no_llm or not require_llm:
+        return _deterministic_with_intent(ai_key)
+
+    active_router = _build_router(router)
+    validation_errors: list[str] = []
+
+    for attempt_idx in range(2):
+        strict = attempt_idx == 1
+        prompt = _llm_prompt(ai_key, strict=strict, prior_errors=validation_errors)
+        try:
+            raw = active_router.invoke("auditor", prompt)
+            report_candidate = _parse_llm_report(raw)
+        except Exception as exc:
+            validation_errors.append(f"attempt {attempt_idx + 1}: invoke/parse failed: {exc}")
+            continue
+
+        valid, errors = validate_report(report_candidate, ai_key)
+        if valid:
+            return report_candidate
+        validation_errors.extend([f"attempt {attempt_idx + 1}: {err}" for err in errors])
+
+    return _fallback_with_note(ai_key, validation_errors)
 
 
 def diagnose_no_sound(ai_key: dict) -> dict:

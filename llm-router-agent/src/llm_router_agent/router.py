@@ -76,6 +76,8 @@ class ModelRegistry:
                 model=self.ollama_model,
                 base_url=self.ollama_base_url,
                 temperature=0.1,
+                streaming=False,
+                request_timeout=60,
             )
         return self._ollama_llm
 

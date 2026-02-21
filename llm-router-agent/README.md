@@ -69,6 +69,27 @@ Run tests:
 pytest -q
 ```
 
+## CLI Demo
+
+Deterministic mode:
+
+```bash
+python -m llm_router_agent.cli \
+  --ai-key fixtures/ai_key/no_sound_audio_engine_off.json \
+  --llm-provider none \
+  --no-llm
+```
+
+Require LLM mode (validated output):
+
+```bash
+python -m llm_router_agent.cli \
+  --ai-key fixtures/ai_key/no_sound_audio_engine_off.json \
+  --llm-provider ollama \
+  --llm-model llama3.1:latest \
+  --require-llm
+```
+
 ## Architecture
 
 ```mermaid
