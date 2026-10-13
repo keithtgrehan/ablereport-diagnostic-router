@@ -1,540 +1,97 @@
 # AbleReport
 
-Deterministic-first diagnostic engine for Ableton Live export data.
+**Turn “there is no sound” into a specific diagnosis, supporting evidence and a next step.**
 
-AbleReport takes structured **AI Key JSON** exported from an Ableton Live project and turns it into a **schema-locked diagnostic report**. The goal is not to generate vague music advice. The goal is to identify technical and structural problems faster than manual inspection, while keeping every meaningful conclusion tied to explicit evidence in the input.
+[Inspect a sample input](llm-router-agent/fixtures/ai_key/no_sound_audio_engine_off.json) · [Read the diagnostic logic](llm-router-agent/src/llm_router_agent/deterministic/no_sound.py) · [Review the tests](llm-router-agent/tests/)
 
----
+AbleReport is a portfolio prototype for technical troubleshooting in Ableton Live. It reads a structured JSON snapshot of project state, checks a defined set of no-sound conditions and returns a report explaining the result and what to check next.
 
-## What AbleReport Is
+The product idea is to make a support interaction more useful: **identify an observable condition, show the evidence and give the user a concrete action.**
 
-AbleReport is a diagnostic layer that sits between an Ableton Live project export and a user-facing report.
+## See the working example
 
-High-level flow:
-
-```text
-Ableton Live Project
--> AI Key JSON Export
--> Diagnostic Engine
-   -> Deterministic Checks
-   -> Validation Layer
-   -> Optional LLM Reasoning
--> DiagnosticReport Output
-```
-
-This design is deliberate:
-
-- deterministic checks run first
-- output shape is validated against a fixed schema
-- LLM reasoning is optional and bounded
-- unsupported speculation is not allowed
-
----
-
-## Core Promise
-
-AbleReport turns Ableton Live export data into structured, evidence-backed diagnostics.
-
-It is built to:
-
-- reduce time to produce a first-pass diagnostic view
-- improve consistency of issue detection
-- keep outputs auditable through evidence references
-- return practical next actions instead of generic commentary
-
-Manual project review is slow. Generic AI summaries are usually vague. AbleReport exists to produce structured, testable diagnosis rather than open-ended opinion.
-
----
-
-## Product Stance
-
-AbleReport is intentionally opinionated.
-
-### Principles
-
-- Deterministic first
-- Schema-locked outputs
-- Evidence-linked findings
-- Minimal speculation
-- Backward-compatible implementation where possible
-
-### Operating rule
-
-If a finding is not supported by the input, it should not appear as fact.
-
-That means:
-
-- every finding must be grounded in explicit evidence from the JSON
-- uncertainty must be stated clearly when evidence is weak or incomplete
-- recommended actions must be specific and testable
-- creative coaching is not the source of truth
-
----
-
-## What AbleReport Is Not
-
-AbleReport is **not** designed to be:
-
-- an open-ended music coach
-- a generative arrangement assistant
-- a DAW control layer
-- an automated project editor
-- a system that hallucinates explanations from thin air
-
-This is a **technical diagnostic system** first.
-
----
-
-## Current MVP Scope
-
-### In scope
-
-- Accept AI Key JSON
-- Produce a schema-locked diagnostic report
-- Prioritize signal path, routing, gain, and device chain issues
-- Return concise recommended actions
-
-### Out of scope
-
-- Open-ended music coaching
-- Generative arrangement advice
-- DAW control or automated project editing
-
----
-
-## Diagnostic Priority Order
-
-AbleReport should inspect issues in a strict order of importance:
-
-1. Missing or broken audio signal path
-2. Routing or gain-staging issues
-3. Device chain problems
-4. Arrangement or structural issues only when strongly evidenced
-5. Clear statement of uncertainty when evidence is insufficient
-
-This matters because a missing signal path is more important than stylistic advice, and a routing failure is more important than abstract mix commentary.
-
----
-
-## Input: AI Key JSON
-
-AbleReport accepts an **AI Key** JSON object representing exported Ableton project data.
-
-Current schema supports these top-level properties:
-
-- `project_name`
-- `tracks`
-- `devices`
-- `routing`
-- `timeline`
-
-The current AI Key schema is intentionally permissive at the top level with `additionalProperties: true`. That keeps the system forward-compatible as the Ableton export becomes richer over time.
-
-### Example input
+The [audio-engine fixture](llm-router-agent/fixtures/ai_key/no_sound_audio_engine_off.json) contains:
 
 ```json
 {
-  "project_name": "Demo Track",
-  "tracks": [
-    {
-      "name": "Kick",
-      "type": "audio",
-      "devices": ["EQ Eight", "Saturator", "Utility"]
-    },
-    {
-      "name": "Bass",
-      "type": "midi",
-      "devices": ["Operator", "Auto Filter"]
-    },
-    {
-      "name": "Pad",
-      "type": "audio",
-      "devices": []
-    }
-  ],
-  "routing": {
-    "master": true
+  "project": {
+    "transport_running": true,
+    "audio_engine_enabled": false
   }
 }
 ```
 
-### Why JSON first
+The diagnostic path identifies `audio_engine_disabled`, cites `$.project.audio_engine_enabled` with the value `false`, and recommends enabling the audio engine, checking the output device and confirming signal at the master meter.
 
-Using structured export data instead of screenshots or free text gives AbleReport three real advantages:
+The snippet above is an excerpt; the linked fixture contains the complete demo input. You can run it without Ableton, a model server or an API key.
 
-- deterministic inspection becomes possible
-- evidence paths can point to exact fields
-- the same project can be tested repeatedly and consistently
+## What works
 
----
+| Capability | Why it matters |
+| --- | --- |
+| Ordered checks for five no-sound conditions | Cover audio-engine state, transport, master mute, master volume and clip presence through an inspectable rule path. |
+| Structured diagnostic reports | Return a diagnosis, evidence, checks performed and practical fix steps in a consistent shape. |
+| Optional model-generated reports | Explore natural-language assistance within an explicit output contract. |
+| Schema and evidence validation for model output | Check the report structure and confirm that cited paths and values match the input. |
+| One retry, then deterministic fallback | Preserve a usable baseline when model output fails validation. |
+| Fixtures and automated tests | Exercise diagnosis, validation, retry and fallback without relying on a live provider. |
 
-## Output: DiagnosticReport JSON
+## Why the design starts with rules
 
-AbleReport returns a **DiagnosticReport** JSON object.
+**Known conditions deserve explicit checks.** An audio engine being disabled is an observable state. A deterministic rule makes that diagnosis straightforward to explain, test and reproduce. The model is optional because the core user task does not need one.
 
-### Required top-level fields
+**Structured input makes evidence checkable.** The input format, called an “AI Key”, is a JSON project-state snapshot. A finding can point to a precise field and value. That gives the reviewer a stronger basis for inspection than an interpretation of a screenshot.
 
-- `report_version`
-- `project_name`
-- `summary`
-- `findings`
-- `limitations`
+**Validation belongs between generation and use.** Optional model output is checked against the report schema and input evidence. A failed result receives one stricter retry, then returns to the rule-based result with an explanatory note. These checks verify structure and cited data; they do not independently prove every generated explanation is correct.
 
-### Required fields for each finding
+**Solve one troubleshooting journey before widening coverage.** No-sound diagnosis provides a bounded problem with repeatable examples. Broader routing analysis, musical advice and automatic project editing would need different evidence and tests. Keeping them outside this demo makes the implemented behaviour easier to assess.
 
-- `id`
-- `category`
-- `severity`
-- `title`
-- `explanation`
-- `evidence`
-- `recommended_action`
+## What this project demonstrates
 
-### Required fields for each evidence item
+For a customer-facing commercial role, the useful connection is the quality of the handoff: turn a vague problem into a structured question, identify the information needed, and communicate a practical next step.
 
-- `field_path`
-- `excerpt`
-- `confidence`
+This portfolio project by Keith Grehan was developed with AI-assisted tooling. It provides a concrete way to discuss requirements, technical trade-offs and the reliability of an AI-assisted workflow. Its demonstrated scope is supplied JSON and selected no-sound cases; direct export from Ableton is a separate integration step.
 
-### Why this matters
+## Run the demo
 
-Most AI diagnostics fail because they blur observation, interpretation, and invention. AbleReport forces those apart:
+Use Python 3.11 or newer. From the repository root:
 
-- the input is structured
-- the output shape is fixed
-- each finding needs evidence
-- limitations are explicit
-
-That makes the result more auditable, easier to debug, and more useful for future evaluation.
-
----
-
-## Example Report Shape
-
-```json
-{
-  "report_version": "0.1.0",
-  "project_name": "Demo Track",
-  "summary": "One likely signal-chain issue was detected and should be checked before broader mix review.",
-  "findings": [
-    {
-      "id": "F-001",
-      "category": "device_chain",
-      "severity": "medium",
-      "title": "Audio track has no devices",
-      "explanation": "The Pad track is an audio track with an empty device list. This may be valid, but it removes any evidence of processing or utility control on that channel.",
-      "evidence": [
-        {
-          "field_path": "tracks[2].devices",
-          "excerpt": "[]",
-          "confidence": 0.95
-        }
-      ],
-      "recommended_action": "Confirm whether the Pad track is intentionally unprocessed. If not, inspect the track chain, routing, and expected utilities or inserts."
-    }
-  ],
-  "limitations": [
-    "The report only reflects fields present in the supplied AI Key JSON.",
-    "No unsupported assumptions were made about missing timeline or routing detail."
-  ]
-}
+```bash
+cd llm-router-agent
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+python -m llm_router_agent.cli \
+  --ai-key fixtures/ai_key/no_sound_audio_engine_off.json \
+  --llm-provider none \
+  --no-llm
 ```
 
----
+The command prints the diagnostic report as JSON. Additional [fixtures](llm-router-agent/fixtures/ai_key/) demonstrate a stopped transport, muted master, silenced master volume and absent clips.
 
-## Architecture
+Run the focused diagnostic checks from the same directory:
 
-AbleReport is designed as a layered system.
+```bash
+python -m pytest -q tests/test_cli.py tests/test_deterministic_no_sound.py \
+  tests/test_deterministic_no_sound_validated.py tests/test_validation.py
+```
 
-### 1. Ableton export layer
-A Live project is exported into AI Key JSON.
+The [implementation notes](llm-router-agent/ABLE_REPORT_IMPLEMENTATION_NOTES.md) explain the optional model path. The deterministic demo above is the simplest review route; live provider setup is optional.
 
-### 2. Deterministic diagnostic engine
-Concrete rules inspect the JSON for specific technical issues.
-
-Examples:
-
-- missing routing
-- broken signal path indicators
-- empty device chains
-- suspicious gain or utility states
-- structural inconsistencies in exported data
-
-### 3. Validation layer
-The output is validated against the `DiagnosticReport` schema.
-
-This ensures:
-
-- stable structure
-- required fields present
-- less downstream fragility
-- easier testing
-
-### 4. Optional LLM reasoning layer
-An LLM may help convert rule hits into concise explanations, summaries, or prioritised phrasing.
-
-But the LLM is constrained:
-
-- it must not invent facts
-- it must not override explicit evidence
-- it must remain inside the validated output contract
-
----
-
-## Deterministic-First Philosophy
-
-AbleReport should always prefer a narrow, grounded answer over a broad but unreliable one.
-
-Good behavior:
-
-- detect one real issue clearly
-- cite the exact source field
-- explain why it matters
-- recommend a specific next check
-
-Bad behavior:
-
-- improvising arrangement advice without evidence
-- claiming a routing bug with no routing data
-- making creative judgments sound like technical facts
-
----
-
-## Current State
-
-Based on the project documents available, the current build includes:
-
-- prompt scaffolding
-- report schema
-- API runner skeleton
-- example inputs
-
-That means the project is at a useful early foundation stage, but not yet a finished production system.
-
----
-
-## What Still Needs To Be Built
-
-### Near-term
-
-- deterministic rule set beyond scaffolding
-- JSON parse failure handling
-- smoke tests and targeted rule tests
-- comparison of deterministic-only output vs optional LLM-assisted explanation layer
-
-### Later
-
-- evaluation dataset
-- wider rule coverage
-- confidence calibration
-- benchmark process for report quality and consistency
-
----
-
-## Suggested Rule Development Strategy
-
-Do not try to solve everything at once.
-
-Build AbleReport by adding narrowly scoped deterministic rules one at a time.
-
-### Rule template
-
-For each new rule:
-
-1. detect one concrete issue
-2. emit one evidence-backed finding
-3. keep edits minimal
-4. add or update one test
-5. preserve existing behavior outside that rule
-
-This matches the project’s existing implementation guidance and keeps the engine stable.
-
-Examples of strong early rules:
-
-- audio track with empty device chain
-- missing master routing flag
-- malformed or missing track list
-- routing object absent where required by current analysis mode
-- timeline missing when a rule depends on it
-
----
-
-## Schemas
-
-### AIKey schema
-
-The current AI Key schema is permissive, which is good for forward compatibility but means downstream rules need to handle incomplete or irregular data defensively.
-
-### DiagnosticReport schema
-
-The current report schema is strict, which is good. It forces:
-
-- predictable output structure
-- explicit evidence objects
-- controlled top-level fields
-- fewer silent format failures
-
-That strictness should stay.
-
----
-
-## Suggested Repo Structure
-
-The existing docs indicate a structure along these lines:
+## Architecture and code guide
 
 ```text
-.
-├── docs/           # product docs and architecture notes
-├── prompts/        # system and task prompts
-├── schemas/        # AIKey and DiagnosticReport JSON schemas
-├── examples/       # sample inputs and sample outputs
-├── src/            # runner, rules, validation, report assembly
-├── tests/          # smoke tests and rule tests
-└── README.md
+Project-state JSON → ordered rules → diagnostic report
+        ↓
+Optional model → schema + evidence checks → accepted report
+                        ↓ validation failure after retry
+                  deterministic fallback
 ```
 
-If the repo is not yet organised this way, it should be.
+- [Diagnostic rules and retry/fallback](llm-router-agent/src/llm_router_agent/deterministic/no_sound.py)
+- [Report models](llm-router-agent/src/llm_router_agent/models.py)
+- [Evidence validation](llm-router-agent/src/llm_router_agent/validation.py)
+- [CLI and optional provider wiring](llm-router-agent/src/llm_router_agent/cli.py)
+- [Implementation notes](llm-router-agent/ABLE_REPORT_IMPLEMENTATION_NOTES.md)
 
----
-
-## Local Setup
-
-Current setup guidance from the project stub is minimal:
-
-```bash
-make setup
-cp .env.example .env
-```
-
-Add your API key to `.env` if the optional LLM layer is enabled.
-
-If you are running deterministic-only mode, the API key should not be required.
-
----
-
-## Run
-
-```bash
-make run
-```
-
----
-
-## Test
-
-```bash
-make test
-```
-
----
-
-## Recommended Modes
-
-### Deterministic-only mode
-Use this for:
-
-- testing core logic
-- validating rules
-- debugging outputs
-- building confidence in the engine
-
-### Optional LLM-assisted mode
-Use this only for:
-
-- compressing explanations
-- improving summary wording
-- routing to bounded reasoning helpers
-
-The LLM should improve readability, not replace truth.
-
----
-
-## Failure Handling Principles
-
-AbleReport should fail clearly, not silently.
-
-Recommended behavior:
-
-- invalid JSON -> return a clear parse or validation error
-- missing required report fields -> fail schema validation
-- incomplete input -> return limited findings plus explicit limitations
-- unsupported structures -> note limits instead of inventing interpretations
-
----
-
-## Evaluation Philosophy
-
-A good AbleReport evaluation set should test:
-
-- whether findings are actually supported by input evidence
-- whether important technical issues are prioritised correctly
-- whether recommended actions are specific and testable
-- whether limitations are honest when data is incomplete
-- whether deterministic-only and LLM-assisted modes stay aligned
-
-Do not evaluate this like a creative assistant. Evaluate it like a diagnostic tool.
-
----
-
-## Why This Product Has Real Potential
-
-The product idea is strong because it avoids the usual weak AI pattern.
-
-It does **not** start from “ask an LLM to review a music project.”
-It starts from:
-
-- structured export
-- deterministic inspection
-- evidence-backed reporting
-- bounded reasoning only where useful
-
-That is the right foundation for something that might eventually become reliable enough for repeated use.
-
----
-
-## Honest Limitations Right Now
-
-Based on the supplied project docs, this is the honest status:
-
-- the architecture is clear
-- the product stance is clear
-- the schemas are in place
-- the operating rules are sensible
-- the implementation appears early and narrow
-- rule coverage and testing still need real work
-
-That is not a weakness if it is presented honestly. It is an early but well-scoped system with the right design direction.
-
----
-
-## Roadmap Summary
-
-### Phase 1
-- get one or two deterministic rules working end to end
-- validate outputs against schema
-- add smoke tests
-
-### Phase 2
-- expand rule coverage for routing, signal path, and device issues
-- improve parse and failure handling
-- compare deterministic-only vs optional LLM explanation layer
-
-### Phase 3
-- build evaluation dataset
-- measure consistency and usefulness
-- calibrate confidence and prioritisation
-
-### Phase 4
-- widen supported AI Key export detail
-- support more nuanced diagnostic categories
-- prepare for productised interface or API consumers
-
----
-
-## Repo Summary
-
-AbleReport is a deterministic-first diagnostic engine for Ableton Live project exports.
-
-It uses structured AI Key JSON as input, applies evidence-backed checks, and produces a schema-locked diagnostic report. It is deliberately narrow, technical, and auditable. Optional LLM support may improve phrasing, but it must never become the source of truth.
-
-
+The package also contains reusable routing and planning components. The no-sound CLI is the focused AbleReport demonstration described here.
