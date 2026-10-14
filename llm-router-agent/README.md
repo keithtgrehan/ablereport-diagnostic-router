@@ -1,111 +1,80 @@
-# llm-router-agent
+# Offline Audio Transcriber & Summarizer (OATS)
 
-Reusable LLM Router Agent library for AbleReport project planning workflows.
+## Goal + Stack
+Local pipeline for:
 
-- Distribution: `llm-router-agent`
-- Import: `llm_router_agent`
-- Routing policy: Groq for `scoper`, Ollama-first for the rest, with explicit mapper fallback to Groq
+`audio file -> offline ASR -> deterministic cleaning/segmentation -> action extraction -> optional validated local LLM -> structured outputs`
 
-## Quickstart
+Core stack:
+- Python 3.11+
+- Pydantic v2 (strict schemas/validation)
+- Regex-based deterministic extraction
+- Offline Whisper backends (`faster-whisper` or `openai-whisper`), with transcript override fallback
+- Optional local Ollama for `validated_llm` / `llm_optional`
 
-1. Create and activate a virtual environment:
-
+## Setup
 ```bash
 cd llm-router-agent
 python -m venv .venv
 source .venv/bin/activate
-```
-
-2. Install in editable mode:
-
-```bash
 pip install -e .
 ```
 
-3. Set required env vars:
-
+Optional for offline ASR:
 ```bash
-export GROQ_API_KEY=your_groq_api_key
-export LLM_PROVIDER=ollama
-export OLLAMA_MODEL=llama3.1
-export GROQ_MODEL=llama-3.3-70b-versatile
+pip install faster-whisper
+# or: pip install openai-whisper
 ```
 
-Optional:
-
+Optional for LLM modes:
 ```bash
+# make sure Ollama is running locally
 export OLLAMA_BASE_URL=http://localhost:11434
+export OLLAMA_MODEL=llama3.1:8b
 ```
 
-4. Run the graph:
-
-```python
-from llm_router_agent import Team, TeamMember, build_graph
-
-team = Team(
-    team_members=[
-        TeamMember(name="Alice", role="Lead", skills=["Python", "Planning"], seniority="Senior"),
-        TeamMember(name="Bob", role="Frontend", skills=["React"], seniority="Mid"),
-    ]
-)
-
-state = {
-    "project_description": "Build a customer analytics dashboard",
-    "team": team,
-    "iteration_number": 0,
-    "max_iteration": 2,
-    "insights": [],
-    "project_risk_score_iterations": [],
-}
-
-graph = build_graph()
-result = graph.invoke(state)
-print(result.keys())
-```
-
-Run tests:
-
+## CLI Modes + Examples
+Deterministic only (no LLM):
 ```bash
-pytest -q
+PYTHONPATH=src python -m oats \
+  --audio /path/to/memo.wav \
+  --mode deterministic
 ```
 
-## CLI Demo
-
-Deterministic mode:
-
+Strict validated LLM (fails if JSON/schema invalid):
 ```bash
-python -m llm_router_agent.cli \
-  --ai-key fixtures/ai_key/no_sound_audio_engine_off.json \
-  --llm-provider none \
-  --no-llm
+PYTHONPATH=src python -m oats \
+  --audio /path/to/memo.wav \
+  --mode validated_llm \
+  --ollama-model llama3.1:8b
 ```
 
-Require LLM mode (validated output):
-
+LLM optional (fallback to deterministic on validation failure):
 ```bash
-python -m llm_router_agent.cli \
-  --ai-key fixtures/ai_key/no_sound_audio_engine_off.json \
-  --llm-provider ollama \
-  --llm-model llama3.1:latest \
-  --require-llm
+PYTHONPATH=src python -m oats \
+  --audio /path/to/memo.wav \
+  --mode llm_optional \
+  --include-sentiment
 ```
 
-## Architecture
-
-```mermaid
-flowchart LR
-    A["Router Policy"] --> B["scoper (Groq)"]
-    A --> C["mapper (Ollama -> Groq fallback)"]
-    A --> D["scheduler/allocator/capacity_audit/auditor/optimizer (Ollama-first)"]
-    B --> E["LangGraph State Machine"]
-    C --> E
-    D --> E
-    E --> F["State Updates via Typed Schemas"]
-    F --> E
+Handy dev override (skip ASR, use text file):
+```bash
+PYTHONPATH=src python -m oats \
+  --audio /path/to/memo.wav \
+  --transcript-override /path/to/memo.txt
 ```
 
-## How This Helps AbleReport
+## Output Bundle Structure
+Each run writes to `runs/<timestamp>/`:
 
-- Deterministic JSON IO: strips fences, extracts JSON from mixed text, validates with Pydantic, and repairs malformed payloads.
-- Per-node routing: provider selection is explicit and centralized, so scoping, mapping, and execution behavior are predictable.
-- Reusable node contracts: each node is a pure state-update function with stable input/output schema boundaries.
+```text
+runs/<timestamp>/
+  run.json
+  report.md
+  audio_metadata.json
+  transcript_raw.txt
+  transcript_clean.txt
+  segments.json
+  actions_deterministic.json
+  actions_final.json
+```
